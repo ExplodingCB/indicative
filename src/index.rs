@@ -23,11 +23,33 @@ const MAX_DEPTH: u8 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct Entry {
     name_off: u32,
     parent: u32,   // entry index, or ROOT_BIT | root index
     name_len: u16,
     meta: u16,     // DIR_BIT | days since 2000-01-01 of last write
+    mask: u32,     // char_mask() of the name, for O(1) rejection
+}
+
+/// Which character classes occur in a (WTF-8) string: one bit per ASCII
+/// letter (case-folded), plus digit, '.', other ASCII and non-ASCII bits.
+/// A name can only match if it contains every class the query contains.
+#[inline]
+pub fn char_mask(s: &[u8]) -> u32 {
+    let mut m = 0u32;
+    for &b in s {
+        m |= match b {
+            b'a'..=b'z' => 1 << (b - b'a'),
+            b'A'..=b'Z' => 1 << (b - b'A'),
+            b'0'..=b'9' => 1 << 26,
+            b'.' => 1 << 27,
+            b' ' => 0, // multi-word queries match words independently
+            0..=0x7F => 1 << 28,
+            _ => 1 << 29,
+        };
+    }
+    m
 }
 
 pub struct Root {
@@ -48,6 +70,10 @@ impl FileIndex {
     pub fn name(&self, i: usize) -> &[u8] {
         let e = &self.entries[i];
         &self.names[e.name_off as usize..e.name_off as usize + e.name_len as usize]
+    }
+    #[inline]
+    pub fn mask(&self, i: usize) -> u32 {
+        self.entries[i].mask
     }
     #[inline]
     pub fn is_dir(&self, i: usize) -> bool {
@@ -162,6 +188,7 @@ pub fn scan(roots: Vec<Root>, max: usize) -> FileIndex {
                     parent,
                     name_len: len as u16,
                     meta: filetime_days(&fd.ftLastWriteTime) | if is_dir { DIR_BIT } else { 0 },
+                    mask: char_mask(&names[off..off + len]),
                 });
                 if is_dir {
                     if depth < MAX_DEPTH && attr & FILE_ATTRIBUTE_REPARSE_POINT == 0 {

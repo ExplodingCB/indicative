@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod apps;
+mod bench;
 mod config;
 mod ffi;
 mod history;
@@ -66,6 +67,7 @@ fn main() {
             ui::signal_running(ui::WM_APP_QUIT);
         }
         "--background" => ui::run(false),
+        "--bench" => bench::run(&args[1..].iter().map(std::path::PathBuf::from).collect::<Vec<_>>()),
         _ => ui::run(true),
     }
 }

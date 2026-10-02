@@ -17,35 +17,35 @@ static int is_sep(uint8_t c) {
            c == '&' || c == '\'' || c == ':';
 }
 
-/* Lowercase ASCII and the Latin-1 block (U+00C0..U+00DE as C3 80..C3 9E),
- * and flag word starts on the original casing (separators, camelCase,
- * letter->digit transitions). */
-static int fold(const uint8_t *s, int slen, uint8_t *b, uint8_t *ws) {
+/* Lowercase ASCII and the Latin-1 block (U+00C0..U+00DE = C3 80..C3 9E).
+ * Branch-light so it vectorizes; Latin-1 is patched in a second pass only
+ * when a C3 lead byte was seen. */
+static int fold(const uint8_t *s, int slen, uint8_t *b) {
     int n = slen > MAXN ? MAXN : slen;
-    uint8_t prev = 0;
-    int prev_lower = 0, prev_digit = 0;
+    unsigned hi = 0;
     for (int i = 0; i < n; i++) {
         uint8_t c = s[i];
-        int upper = (c >= 'A' && c <= 'Z');
-        int lower = (c >= 'a' && c <= 'z');
-        int digit = (c >= '0' && c <= '9');
-        uint8_t f = upper ? (uint8_t)(c + 32) : c;
-        if (prev == 0xC3 && c >= 0x80 && c <= 0x9E && c != 0x97) f = (uint8_t)(c + 0x20);
-        b[i] = f;
-        int start;
-        if (i == 0) start = 1;
-        else if (is_sep(prev)) start = !is_sep(c);
-        else if (upper && prev_lower) start = 1;
-        else if (digit && !prev_digit && (prev_lower || (prev >= 'A' && prev <= 'Z'))) start = 1;
-        else start = 0;
-        /* never mark a UTF-8 continuation byte as a word start */
-        if ((c & 0xC0) == 0x80) start = 0;
-        ws[i] = (uint8_t)start;
-        prev = c;
-        prev_lower = lower;
-        prev_digit = digit;
+        b[i] = (uint8_t)(c + (((unsigned)(c - 'A') < 26u) << 5));
+        hi |= c;
+    }
+    if (hi & 0x80) {
+        for (int i = 1; i < n; i++)
+            if (s[i - 1] == 0xC3 && s[i] >= 0x80 && s[i] <= 0x9E && s[i] != 0x97) b[i] = (uint8_t)(s[i] + 0x20);
     }
     return n;
+}
+
+/* Word start on the original casing: after a separator, camelCase hump,
+ * or a letter->digit transition. Never on a UTF-8 continuation byte. */
+static int word_start(const uint8_t *s, int i) {
+    if (i == 0) return 1;
+    uint8_t c = s[i], p = s[i - 1];
+    if ((c & 0xC0) == 0x80) return 0;
+    if (is_sep(p)) return !is_sep(c);
+    int pl = p >= 'a' && p <= 'z', pu = p >= 'A' && p <= 'Z';
+    if (c >= 'A' && c <= 'Z' && pl) return 1;
+    if (c >= '0' && c <= '9' && (pl || pu)) return 1;
+    return 0;
 }
 
 /* Smith-Waterman-ish alignment of q as a subsequence of b. */
@@ -83,9 +83,9 @@ static int fuzzy_dp(const uint8_t *q, int qlen, const uint8_t *b, const uint8_t 
 }
 
 int32_t fz_score(const uint8_t *q, int32_t qlen, const uint8_t *s, int32_t slen, int32_t allow_fuzzy) {
-    uint8_t b[MAXN], ws[MAXN];
+    uint8_t b[MAXN];
     if (qlen <= 0 || slen <= 0) return 0;
-    int n = fold(s, slen, b, ws);
+    int n = fold(s, slen, b);
     if (qlen > n) return 0;
 
     int lenpen = n - qlen;
@@ -95,10 +95,14 @@ int32_t fz_score(const uint8_t *q, int32_t qlen, const uint8_t *s, int32_t slen,
 
     int first_sub = -1, first_ws = -1;
     const uint8_t q0 = q[0];
-    for (int i = 0; i + qlen <= n; i++) {
-        if (b[i] != q0 || memcmp(b + i, q, (size_t)qlen) != 0) continue;
-        if (first_sub < 0) first_sub = i;
-        if (ws[i]) { first_ws = i; break; }
+    const uint8_t *p = b, *end = b + n - qlen + 1;
+    while (p < end && (p = memchr(p, q0, (size_t)(end - p))) != NULL) {
+        int i = (int)(p - b);
+        if (memcmp(p, q, (size_t)qlen) == 0) {
+            if (first_sub < 0) first_sub = i;
+            if (word_start(s, i)) { first_ws = i; break; }
+        }
+        p++;
     }
     if (first_ws == 0) return 9000 - lenpen * 10;
     if (first_ws > 0) {
@@ -110,7 +114,7 @@ int32_t fz_score(const uint8_t *q, int32_t qlen, const uint8_t *s, int32_t slen,
     if (qlen >= 2) {
         int qi = 0;
         for (int i = 0; i < n && qi < qlen; i++)
-            if (ws[i] && b[i] == q[qi]) qi++;
+            if (b[i] == q[qi] && word_start(s, i)) qi++;
         if (qi == qlen) {
             int sc = 7000 - lenpen * 5;
             return sc < 6001 ? 6001 : sc;
@@ -130,6 +134,8 @@ int32_t fz_score(const uint8_t *q, int32_t qlen, const uint8_t *s, int32_t slen,
         for (int i = 0; i < n && qi < qlen; i++) if (b[i] == q[qi]) qi++;
         if (qi < qlen) return 0;
     }
+    uint8_t ws[MAXN];
+    for (int i = 0; i < n; i++) ws[i] = (uint8_t)word_start(s, i);
     int qn = qlen > 64 ? 64 : qlen;
     int raw = fuzzy_dp(q, qn, b, ws, n);
     /* require on average more than a bare match per character */

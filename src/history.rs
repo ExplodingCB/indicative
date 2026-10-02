@@ -1,13 +1,16 @@
 //! Launch history: lets frequently / recently opened items float up,
 //! the way Spotlight learns what you pick.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 const MAX_ENTRIES: usize = 800;
 
 pub struct History {
     map: HashMap<Vec<u8>, (u32, u64)>, // WTF-8 key -> (count, last unix secs)
+    /// Last path component of every key, so file search can skip building
+    /// full paths for names that were never opened.
+    names: HashSet<Vec<u8>>,
     path: PathBuf,
 }
 
@@ -27,7 +30,22 @@ impl History {
                 }
             }
         }
-        History { map, path }
+        let mut h = History { map, names: HashSet::new(), path };
+        h.rebuild_names();
+        h
+    }
+
+    fn rebuild_names(&mut self) {
+        self.names = self.map.keys().map(|k| Self::last_component(k).to_vec()).collect();
+    }
+
+    fn last_component(k: &[u8]) -> &[u8] {
+        k.rsplit(|&b| b == b'\\').next().unwrap_or(k)
+    }
+
+    /// Could a file with this (WTF-8) name have history?
+    pub fn knows_name(&self, name: &[u8]) -> bool {
+        self.names.contains(name)
     }
 
     fn key(target: &[u16]) -> Vec<u8> {
@@ -69,6 +87,7 @@ impl History {
                 self.map.remove(&k);
             }
         }
+        self.rebuild_names();
         self.save();
     }
 

@@ -41,6 +41,9 @@ pub const WM_APP_QUIT: u32 = WM_APP + 4;
 const CLASS: &str = "IndicativeSpotlight";
 const TIMER_CARET: usize = 1;
 const TIMER_TRIM: usize = 2;
+/// Strip height in rows. Taller strips were measured: ~0.1 ms faster per
+/// keystroke but double the memory while open, so strips stay one row tall.
+const STRIP_ROWS: i32 = 1;
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 static UI: AtomicPtr<Ui> = AtomicPtr::new(null_mut());
@@ -294,6 +297,8 @@ pub struct Ui {
     helper_running: bool,
     apps_refreshed: u64,
     indexed_once: bool,
+    /// INDICATIVE_TRACE=<file>: log keystroke/hotkey -> pixels latency.
+    trace: Option<std::fs::File>,
 }
 
 impl Ui {
@@ -450,7 +455,7 @@ impl Ui {
 
     fn ensure_surfaces(&mut self) -> bool {
         let w = self.m.w;
-        let h = self.m.input_h.max(self.m.row_h);
+        let h = self.m.input_h.max(self.m.row_h) * STRIP_ROWS;
         if self.strip.as_ref().map_or(true, |s| s.w != w || s.h != h) {
             self.strip = Surface::new(w, h);
             self.mask = Surface::new(w, h);
@@ -1263,7 +1268,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     if ui.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    (*ui).handle(hwnd, msg, wp, lp)
+    if (*ui).trace.is_none() {
+        return (*ui).handle(hwnd, msg, wp, lp);
+    }
+    // Timed path: search + layout + render + BitBlt all happen synchronously
+    // inside these handlers, so this is input -> pixels handed to DWM.
+    let t = std::time::Instant::now();
+    let r = (*ui).handle(hwnd, msg, wp, lp);
+    let kind = match msg {
+        WM_CHAR => "key",
+        WM_HOTKEY | WM_APP_SHOW => "show",
+        _ => return r,
+    };
+    if let Some(f) = (*ui).trace.as_mut() {
+        use std::io::Write;
+        let _ = writeln!(f, "{kind}	{}	{}", t.elapsed().as_micros(), (*ui).text.len());
+    }
+    r
 }
 
 /// Post `msg` to an already running instance. Returns false if none.
@@ -1372,6 +1393,7 @@ pub fn run(show_now: bool) {
             helper_running: false,
             apps_refreshed: 0,
             indexed_once: false,
+            trace: std::env::var_os("INDICATIVE_TRACE").and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()),
             cfg,
         });
         let ui = Box::into_raw(ui);

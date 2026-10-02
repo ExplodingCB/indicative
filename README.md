@@ -15,9 +15,31 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ExplodingCB/indicative" alt="MIT license"></a>
 </p>
 
+<h3 align="center">0.5 MB of RAM while idle &nbsp;·&nbsp; 0.06 ms per search &nbsp;·&nbsp; 2.4 ms from keystroke to pixels</h3>
+
 <p align="center">
   <img src="docs/screenshot.png" width="640" alt="Indicative search panel showing a top hit, Visual Studio Code, documents and folders over a blurred desktop">
 </p>
+
+## By the numbers
+
+| | Indicative |
+|---|---|
+| **Memory while idle** (Task Manager "Memory") | **0.5 MB** |
+| **Memory with the panel open** | **2.1 MB** |
+| Private bytes committed | 3.0 MB |
+| **Search, per keystroke** (apps + every file name + calculator + ranking) | **0.056 ms** median, 0.17 ms p99 |
+| **Keystroke to finished frame** (search + layout + render, handed to the compositor) | **2.4 ms** median, 4.9 ms worst |
+| **Win+Space to finished frame** | **8.2 ms** median |
+| Search over 338,000 files (Windows + Program Files indexed) | 3.7 ms median, 10 ms p99 |
+| Initial index scan (6,800 files and folders) | 17 ms |
+| Download | 2.4 MB installer, 0.7 MB exe |
+| Runtime dependencies | none (no .NET, no Electron, no VC++ redistributable) |
+
+Measured on Windows 11 with an AMD Ryzen 7 9800X3D, a real user profile
+(6,800 indexed files and folders, 119 apps), and the default settings. One frame
+at 60 Hz is 16.7 ms, so typing never waits on Indicative. To check these numbers
+on your own machine, see [Measuring it yourself](#measuring-it-yourself).
 
 ## Features
 
@@ -30,8 +52,6 @@
 - **Forgiving matching.** `vsc` finds Visual Studio Code, and `vis code` works too.
   Results you open often move up over time.
 - **Inline calculator.** Type `2^10/4 + sqrt(16)` and press Enter to copy the result.
-- **Tiny.** Native Win32 with no .NET, Electron or runtime. About 2.5 MB of memory
-  while open and about 0.1 MB in Task Manager while idle.
 
 <p align="center">
   <img src="docs/calculator.png" width="560" alt="Indicative calculator result">
@@ -116,9 +136,9 @@ The resident process imports only kernel32, user32, gdi32, dwmapi and advapi32.
   already premultiplied, into one cache file. The launcher maps it read-only, so
   icon pixels are file-backed pages that load only when drawn and never count as
   private memory.
-- **The file index is about 30 bytes per entry**: one WTF-8 name arena plus a
-  12-byte record pointing at the parent folder. Full paths are rebuilt only for
-  the handful of results on screen.
+- **The file index is about 34 bytes per entry**: one WTF-8 name arena plus a
+  16-byte record (parent folder, name, date, character mask). Full paths are
+  rebuilt only for the handful of results on screen.
 - **No window-sized bitmaps.** The panel is drawn in horizontal strips about 60 px
   tall. GDI renders text coverage masks only, and a small C compositor blends
   everything with correct alpha over the DWM acrylic backdrop. Strip buffers are
@@ -128,16 +148,42 @@ The resident process imports only kernel32, user32, gdi32, dwmapi and advapi32.
   I/O priority.
 - **Working-set trim.** A few seconds after the panel closes, Indicative compacts
   its heap and empties its working set. That is why Task Manager shows about
-  0.1 MB while idle. Committed private memory stays around 3 MB, mostly the file
-  index. Reopening the panel soft-faults those pages back in, which takes about
-  a millisecond. Set `trim_memory = false` to keep them resident.
+  0.5 MB while idle. Committed private memory stays around 3 MB, mostly the file
+  index. Reopening soft-faults those pages back in, which is included in the
+  8.2 ms open time above. Set `trim_memory = false` to keep them resident.
 
-Measured on Windows 11 with about 60,000 indexed entries and 120 apps:
+## Why search is fast
 
-| State | Private working set (Task Manager) | Private bytes (commit) |
-|---|---|---|
-| Panel open | ~2.4 MB | ~3.6 MB |
-| Closed (after trim) | ~0.1 MB | ~3.1 MB |
+- **Each entry carries a 4-byte character-class mask** (which letters, digits and
+  so on appear in the name). One AND instruction rejects most of the index
+  before the matcher runs. This alone made search 6× faster.
+- **The matcher in `csrc/fuzzy.c` is allocation-free.** It uses a branch-light
+  ASCII case fold and `memchr` substring search, and checks word boundaries only
+  where a match could land.
+- **Full paths are built only for what you see.** Ranking works on 16-byte
+  records, and paths are rebuilt only for the handful of results on screen, plus
+  files that appear in your launch history.
+- **Large indexes are split across cores.** Above 40,000 entries the scan runs on
+  short-lived threads with 64 KB stacks, each keeping its own top-K list. This
+  made a 338,000-file index 3.4× faster, at no idle memory cost.
+- **Everything runs synchronously on keypress.** No debounce timer and no async
+  hops: the result is drawn before the message handler returns.
+
+## Measuring it yourself
+
+```powershell
+# search benchmark against your own index (prints a table)
+indicative.exe --bench | more
+
+# same, but index specific folders instead, e.g. a huge one
+indicative.exe --bench C:\Windows "C:\Program Files"
+
+# log real keystroke-to-pixels and hotkey-to-pixels timings (microseconds)
+$env:INDICATIVE_TRACE = "$env:TEMP\indicative-trace.txt"; indicative.exe --quit; indicative.exe
+```
+
+Memory is the "Memory" column in Task Manager (private working set) and
+"Private bytes" in Process Explorer.
 
 ## Ranking
 

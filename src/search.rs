@@ -82,6 +82,62 @@ fn url_encode(s: &str) -> String {
     o
 }
 
+const K: usize = 32;
+
+/// Best K (score, entry) pairs among `range`, scored by name + recency.
+fn scan_range(fi: &FileIndex, q8: &[u8], qmask: u32, min: i32, today: u16, range: std::ops::Range<usize>) -> Vec<(i32, usize)> {
+    let mut top: Vec<(i32, usize)> = Vec::with_capacity(K + 1);
+    let mut floor = min;
+    for i in range {
+        if fi.mask(i) & qmask != qmask {
+            continue;
+        }
+        let s = ffi::score(q8, fi.name(i), false);
+        if s < floor {
+            continue;
+        }
+        let rec = match today.saturating_sub(fi.days(i)) {
+            0..=2 => 300,
+            3..=14 => 180,
+            15..=90 => 60,
+            _ => 0,
+        };
+        let s = s + rec;
+        let pos = top.partition_point(|&(ts, _)| ts >= s);
+        if pos < K {
+            top.insert(pos, (s, i));
+            if top.len() > K {
+                top.pop();
+                // history can still lift a candidate by ~2250, so keep a margin
+                floor = floor.max(top[K - 1].0 - 300 - 2000);
+            }
+        }
+    }
+    top
+}
+
+/// Large indexes are split across cores with short-lived small-stack threads.
+fn scan_files(fi: &FileIndex, q8: &[u8], qmask: u32, min: i32, today: u16) -> Vec<(i32, usize)> {
+    let n = fi.entries.len();
+    let threads = if n < 40_000 { 1 } else { std::thread::available_parallelism().map_or(1, |p| p.get()).clamp(1, 8) };
+    if threads == 1 {
+        return scan_range(fi, q8, qmask, min, today, 0..n);
+    }
+    let chunk = n.div_ceil(threads);
+    let mut all: Vec<(i32, usize)> = std::thread::scope(|sc| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let r = t * chunk..((t + 1) * chunk).min(n);
+                std::thread::Builder::new().stack_size(64 * 1024).spawn_scoped(sc, move || scan_range(fi, q8, qmask, min, today, r))
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.ok().and_then(|h| h.join().ok()).unwrap_or_default()).collect()
+    });
+    all.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    all.truncate(K);
+    all
+}
+
 pub fn run(query: &[u16], cx: &Ctx) -> Vec<Section> {
     let q16 = trim(query);
     if q16.is_empty() {
@@ -151,45 +207,35 @@ pub fn run(query: &[u16], cx: &Ctx) -> Vec<Section> {
     if let (Some(fi), true) = (cx.files, q8.len() >= 2) {
         let min = if q8.len() < 3 { 7001 } else { 4000 };
         let today = crate::util::today_days();
-        const K: usize = 32;
-        let mut top: Vec<(i32, usize)> = Vec::with_capacity(K + 1);
-        let mut floor = min;
-        for i in 0..fi.entries.len() {
-            let s = ffi::score(q8, fi.name(i), false);
-            if s < floor {
+        let qmask = crate::index::char_mask(q8);
+        let top = scan_files(fi, q8, qmask, min, today);
+        // Final scores: depth penalty, plus history - which needs the full
+        // path, so only build it for names that appear in the history.
+        let mut ranked: Vec<(i32, usize)> = top
+            .into_iter()
+            .map(|(s, i)| {
+                let deep = fi.depth(i).saturating_sub(2).min(8) as i32 * 60;
+                let hist = if cx.history.knows_name(fi.name(i)) { cx.history.boost(&fi.full_path(i), now) } else { 0 };
+                (s - deep + hist, i)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        // Build display items only for what can actually be shown.
+        let (mut nd, mut nf) = (0, 0);
+        for (score, i) in ranked {
+            let dir = fi.is_dir(i);
+            if (dir && nf >= 4) || (!dir && nd >= 5) {
                 continue;
             }
-            let age = today.saturating_sub(fi.days(i));
-            let rec = match age {
-                0..=2 => 300,
-                3..=14 => 180,
-                15..=90 => 60,
-                _ => 0,
-            };
-            let s = s + rec;
-            let pos = top.partition_point(|&(ts, _)| ts >= s);
-            if pos < K {
-                top.insert(pos, (s, i));
-                if top.len() > K {
-                    top.pop();
-                    floor = floor.max(top[K - 1].0 - 300 - 2000); // conservative: history can add up to ~2250
-                }
-            }
-        }
-        for (s, i) in top {
-            let path = fi.full_path(i);
-            // deep build/output trees shouldn't outrank files you actually keep around
-            let deep = fi.depth(i).saturating_sub(2).min(8) as i32 * 60;
-            let score = s - deep + cx.history.boost(&path, now);
+            if dir { nf += 1 } else { nd += 1 }
             let mut title = Vec::new();
             crate::util::wtf8_decode(fi.name(i), &mut title);
-            let dir = fi.is_dir(i);
             let icon = match cx.apps {
                 Some(ac) if dir && ac.folder_icon != NO_ICON => Icon::Cache(ac.folder_icon),
                 Some(ac) if !dir && ac.ext_icon(fi.ext(i)) != NO_ICON => Icon::Cache(ac.ext_icon(fi.ext(i))),
                 _ => Icon::Glyph(if dir { GLYPH_FOLDER } else { GLYPH_FILE }),
             };
-            let it = Item { kind: if dir { Kind::Folder } else { Kind::File }, title, detail: fi.location(i), icon, target: path, score };
+            let it = Item { kind: if dir { Kind::Folder } else { Kind::File }, title, detail: fi.location(i), icon, target: fi.full_path(i), score };
             if dir { folders.push(it) } else { docs.push(it) }
         }
         docs.sort_by(|a, b| b.score.cmp(&a.score));
