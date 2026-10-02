@@ -63,6 +63,9 @@ on your own machine, see [Measuring it yourself](#measuring-it-yourself).
 winget install ExplodingCB.Indicative
 ```
 
+(The winget package is [awaiting review](https://github.com/microsoft/winget-pkgs/pull/445421).
+Until it's merged, use the installer below.)
+
 Or download `indicative-setup-<version>.exe` from the
 [latest release](https://github.com/ExplodingCB/indicative/releases/latest)
 and run it. The installer is per-user by default (no admin prompt), adds a Start
