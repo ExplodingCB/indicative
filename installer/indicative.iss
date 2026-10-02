@@ -65,13 +65,21 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExe}"" --background"; Tasks: autostart
+; autostart state marker written by `indicative.exe --autostart`
+Root: HKCU; Subkey: "Software\{#AppName}"; Flags: uninsdeletekey dontcreatekey
 
 [Run]
+; Start at sign-in uses a per-user Task Scheduler logon task (the exe registers
+; it with schtasks), because Explorer can silently skip new HKCU Run entries.
+Filename: "{app}\{#AppExe}"; Parameters: "--autostart on"; Flags: runhidden waituntilterminated; Tasks: autostart
+Filename: "{app}\{#AppExe}"; Parameters: "--autostart off"; Flags: runhidden waituntilterminated; Tasks: not autostart
 ; Interactive installs offer to open the panel; silent installs (winget) just
 ; start it in the background so Win+Space works right away.
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName} now (Win+Space)"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\{#AppExe}"; Parameters: "--background"; Flags: nowait skipifnotsilent
+
+[UninstallRun]
+Filename: "{app}\{#AppExe}"; Parameters: "--autostart off"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAutostart"
 
 [UninstallDelete]
 ; app/icon cache and launch history
@@ -109,8 +117,8 @@ begin
   Result := True;
 end;
 
-// The in-app "Start at Login" command writes the same Run value. Remove it on
-// uninstall only when it points at this install.
+// 0.1.0 and 0.1.1 used an HKCU Run value. Remove it on uninstall only when it
+// points at this install.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Value: String;

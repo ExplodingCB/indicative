@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod apps;
+mod autostart;
 mod bench;
 mod config;
 mod ffi;
@@ -59,12 +60,17 @@ fn main() {
             ui::signal_running(ui::WM_APP_QUIT);
         }
         "--install" => {
-            ui::set_autostart(true);
+            autostart::set(true);
             ui::run(true);
         }
         "--uninstall" => {
-            ui::set_autostart(false);
+            autostart::set(false);
             ui::signal_running(ui::WM_APP_QUIT);
+        }
+        // used by the installer/uninstaller
+        "--autostart" => {
+            let on = args.get(1).map_or(true, |a| a.to_string_lossy() != "off");
+            std::process::exit(if autostart::set(on) { 0 } else { 1 });
         }
         "--background" => ui::run(false),
         "--bench" => bench::run(&args[1..].iter().map(std::path::PathBuf::from).collect::<Vec<_>>()),

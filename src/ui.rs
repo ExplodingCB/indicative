@@ -44,7 +44,6 @@ const TIMER_TRIM: usize = 2;
 /// Strip height in rows. Taller strips were measured: ~0.1 ms faster per
 /// keystroke but double the memory while open, so strips stay one row tall.
 const STRIP_ROWS: i32 = 1;
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 static UI: AtomicPtr<Ui> = AtomicPtr::new(null_mut());
 
@@ -404,7 +403,7 @@ impl Ui {
         if q.len() < 3 {
             return Vec::new();
         }
-        let autostart = autostart_enabled();
+        let autostart = crate::autostart::enabled();
         let cmds: [(&str, &str, u16); 3] = [
             ("Indicative Settings", "settings", 0xE713),
             ("Rebuild Indicative Index", "reindex", 0xE72C),
@@ -799,8 +798,11 @@ impl Ui {
                 self.indexer.poke();
                 self.maybe_refresh_apps(true);
             }
-            "autostart-on" => set_autostart(true),
-            "autostart-off" => set_autostart(false),
+            "autostart-on" | "autostart-off" => {
+                let on = id == "autostart-on";
+                // schtasks takes ~100 ms; keep it off the UI thread
+                let _ = std::thread::Builder::new().stack_size(64 * 1024).spawn(move || crate::autostart::set(on));
+            }
             _ => {}
         }
     }
@@ -1245,24 +1247,6 @@ fn get_clipboard(hwnd: HWND) -> Option<Vec<u16>> {
     }
 }
 
-pub fn autostart_enabled() -> bool {
-    crate::util::reg_string(HKEY_CURRENT_USER, RUN_KEY, "Indicative").is_some()
-}
-
-pub fn set_autostart(on: bool) {
-    let key = wide(RUN_KEY);
-    let name = wide("Indicative");
-    unsafe {
-        if on {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let cmd = wide(&format!("\"{}\" --background", exe.display()));
-            RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), REG_SZ, cmd.as_ptr() as _, (cmd.len() * 2) as u32);
-        } else {
-            RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr());
-        }
-    }
-}
-
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let ui = UI.load(Ordering::Relaxed);
     if ui.is_null() {
@@ -1325,6 +1309,7 @@ pub fn run(show_now: bool) {
         }
 
         let cfg = Config::load();
+        let _ = std::thread::Builder::new().stack_size(64 * 1024).spawn(crate::autostart::migrate_legacy);
         let hinst = GetModuleHandleW(null());
         let cls = wide(CLASS);
         let wc = WNDCLASSEXW {

@@ -117,10 +117,17 @@ Settings are stored in `%APPDATA%\Indicative\config.ini` (or type
 
 ```powershell
 indicative.exe               # start, or show the running copy
-indicative.exe --install     # start at sign-in (HKCU Run key) and start now
+indicative.exe --install     # start at sign-in and start now
 indicative.exe --uninstall   # remove from sign-in and quit
 indicative.exe --quit        # quit the running copy
 ```
+
+Start at sign-in uses a per-user Task Scheduler logon task named `Indicative`,
+not the classic `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry.
+Some Windows 11 builds silently skip newly added Run entries at logon. The task
+needs no admin rights, runs at normal priority, and has no time limit. You can
+see it in Task Scheduler, and toggle it by typing **Start Indicative at Login**
+in the panel.
 
 ---
 

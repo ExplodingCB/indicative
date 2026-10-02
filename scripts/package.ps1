@@ -5,7 +5,9 @@
 # Needs MinGW-w64 GCC (winget install BrechtSanders.WinLibs.POSIX.MSVCRT)
 # and Inno Setup 6 (winget install JRSoftware.InnoSetup).
 param([string]$Version)
-$ErrorActionPreference = "Stop"
+# Native tools write progress to stderr; rely on exit codes, not error records
+# (Windows PowerShell 5.1 turns redirected stderr into errors).
+$ErrorActionPreference = "Continue"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
